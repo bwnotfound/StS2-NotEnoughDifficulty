@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Runs;
 
 namespace NotEnoughDifficulty.NotEnoughDifficultyCode;
@@ -60,5 +60,22 @@ internal static class RunStateAccessor
         }
 
         return null;
+    }
+
+    /// <summary>
+    ///     便捷方法：直接从 <c>RunManager.Instance</c> 取当前 run state。
+    ///     取不到（无 run / 反射失败）返回 null——调用方必须按 null 处理。
+    /// </summary>
+    public static RunState? GetCurrentState()
+    {
+        try
+        {
+            var rm = RunManager.Instance;
+            return rm == null ? null : GetState(rm);
+        }
+        catch
+        {
+            return null;
+        }
     }
 }

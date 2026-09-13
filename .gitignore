@@ -47,3 +47,9 @@ packages/
 Thumbs.db
 desktop.ini
 ehthumbs.db
+# ---- beta 移植（本机） ----
+dist/
+.godot/
+_refs/
+build*.log
+

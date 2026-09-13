@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -56,9 +56,13 @@ internal static class SourceActResolver
         var c = new Dictionary<string, int>(StringComparer.Ordinal);
         try
         {
-            AddAct(c, ModelDb.Act<Overgrowth>(), 1);
-            AddAct(c, ModelDb.Act<Hive>(), 2);
-            AddAct(c, ModelDb.Act<Glory>(), 3);
+            // 按层聚合（走 ActsByIndex，含模组加的 act 变体）——不再按具体 act 类型取
+            for (var layer = 1; layer <= 3; layer++)
+                foreach (var e in RunProgress.CollectFromLayer(layer, a => a.AllEncounters))
+                {
+                    var entry = e?.Id?.Entry;
+                    if (entry != null) c.TryAdd(entry, layer);
+                }
         }
         catch (Exception ex)
         {
@@ -98,80 +102,33 @@ public static class InvalidateSourceActResolverCachePatch
 }
 
 /// <summary>
-///     数值倍率公共逻辑。
-///     倍率 = 全局 × 来源：全局基于"是不是 boss 节点 + 层内进度"决定；来源基于该怪物所属 encounter 的源 act。
-///     <b>仅在 Act4/5 内生效</b>——其他 act 直接返回 (1.0, 1.0)，由调用方做后续早返。
+///     数值强化公共逻辑（第二轮改造后）。
+///
+/// ## 新公式（需求5）
+/// <code>
+///   血量倍率 = 1 + ActFloor × 0.1  × Y / 100
+///   攻击倍率 = 1 + ActFloor × 0.05 × X / 100
+/// </code>
+/// 该层是否启用由 <c>Act{N}_ExtraScaling</c> 决定（1~3 层默认关、4~5 层默认开）。
+/// 未启用的层返回 (1.0, 1.0)，等于完全不改原值。
+///
+/// ## 与旧实现的关系
+/// 旧的「全局倍率(层内线性插值) × 来源 act 倍率 × 总倍率」三层链、boss/普通敌人分开的旋钮、
+/// 以及 <see cref="SourceActResolver" /> 的源 act 反查<b>全部作废</b>——新公式只依赖爬塔层数，
+/// 与"这个怪原本属于哪个 act"无关。
 /// </summary>
 internal static class DifficultyMultiplierContext
 {
     public static (double hp, double dmg) GetCurrentMultipliers(IRunState state, EncounterModel? encounter)
     {
-        int actIdx;
-        if (state.Act is Act4Model) actIdx = 4;
-        else if (state.Act is Act5Model) actIdx = 5;
-        else return (1.0, 1.0);
+        // RunProgress 需要具体 RunState（要读 MapPointHistory / Acts）。
+        // IRunState 也可能是 NullRunState，as 失败即返回 1.0（不影响游戏）。
+        var real = state as RunState;
+        if (real == null) return (1.0, 1.0);
 
-        var isBossNode = IsAtFinalBossNode(state);
-
-        double globalHp, globalDmg;
-        if (isBossNode)
-        {
-            globalHp = ExtraActsConfig.GetBossHpMult(actIdx);
-            globalDmg = ExtraActsConfig.GetBossDmgMult(actIdx);
-        }
-        else
-        {
-            var progress = GetActProgress(state);
-            globalHp = ExtraActsConfig.GetNormalEnemyHpMult(actIdx).Lerp(progress);
-            globalDmg = ExtraActsConfig.GetNormalEnemyDmgMult(actIdx).Lerp(progress);
-        }
-
-        double srcHp = 1.0, srcDmg = 1.0;
-        var srcAct = SourceActResolver.GetSourceActIndex(encounter);
-        if (srcAct.HasValue)
-        {
-            if (isBossNode)
-            {
-                srcHp = ExtraActsConfig.GetSourceBossHpMult(actIdx, srcAct.Value);
-                srcDmg = ExtraActsConfig.GetSourceBossDmgMult(actIdx, srcAct.Value);
-            }
-            else
-            {
-                srcHp = ExtraActsConfig.GetSourceNormalEnemyHpMult(actIdx, srcAct.Value);
-                srcDmg = ExtraActsConfig.GetSourceNormalEnemyDmgMult(actIdx, srcAct.Value);
-            }
-        }
-
-        // 最末尾叠加全局总倍率——用户用来快速调整后两层整体难度，不破坏已平衡好的细节倍率。
-        // 默认都是 1.0，不影响行为。
-        var overallHp = ExtraActsConfig.GetOverallHpMult(actIdx);
-        var overallDmg = ExtraActsConfig.GetOverallDmgMult(actIdx);
-
-        return (globalHp * srcHp * overallHp, globalDmg * srcDmg * overallDmg);
-    }
-
-    private static bool IsAtFinalBossNode(IRunState state)
-    {
-        if (state.Map == null) return false;
-        try
-        {
-            // 防御：BossMapPoint 可能为 null（别的地图 mod 改了 map / 异常地图）。与上面 Map==null
-            // 同一处理哲学——取不到最终 boss 点就视作「不在最终 boss」，让难度走普通倍率而非让
-            // 调用方整体 no-op（异常被上层 Run 吞掉会导致该敌人完全不缩放）。
-            return state.CurrentMapCoord == state.Map.BossMapPoint.coord;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static double GetActProgress(IRunState state)
-    {
-        var actFloor = state.ActFloor;
-        var totalRooms = state.Act.GetNumberOfRooms(state.Players.Count > 1);
-        if (totalRooms <= 0) return 0;
-        return Math.Clamp((double)actFloor / totalRooms, 0.0, 1.0);
+        var hp = RunProgress.GetHpMultiplier(real);
+        var dmg = RunProgress.GetDmgMultiplier(real);
+        return (hp, dmg);
     }
 }
 
@@ -212,11 +169,10 @@ public static class MonsterHpMultiplierPatch
 
         PatchScope.Run(nameof(MonsterHpMultiplierPatch), () =>
         {
-            // 必须在 act4/5 才介入——其他 act 由 base game 控制
+            // [第二轮改造] 不再限制 act4/5——强化改为按层开关控制（1~3 层默认关闭）。
+            // 未启用的层 GetHpMultiplier 返回 1.0，下面立即早返。
             var runState = state.RunState;
             if (runState == null) return;
-            var act = runState.Act;
-            if (act is not Act4Model && act is not Act5Model) return;
 
             // 注意：DifficultyMultiplierContext 在每个 creature 上算出来的 mult 是相同的
             // （取决于 state.Act / state.Map / state.CurrentMapCoord / encounter，跟 creature 个体无关）。
@@ -275,9 +231,8 @@ public static class MonsterDamageMultiplierPatch
         // 它们的攻击不应被敌人伤害倍率放大；只放大真正的敌人攻击。
         if (dealer.Side != CombatSide.Enemy) return;
 
-        // 必须在 act4/5 才介入——其他 act 不动
-        if (runState?.Act is not Act4Model && runState?.Act is not Act5Model) return;
-
+        // [第二轮改造] 不再限制 act4/5——由每层的 ExtraScaling 开关决定是否生效。
+        // 未启用的层返回 1.0，下面早返（对 hot path 的开销就是一次 RunState 判空 + 一次层开关读取）。
         try
         {
             var (_, dmgMult) = DifficultyMultiplierContext.GetCurrentMultipliers(
@@ -340,10 +295,7 @@ public static class CreatureAddSummonHpMultiplierPatch
             var combatState = creature.CombatState;
             if (combatState?.RunState == null) return;
 
-            // 必须在 act4/5 才介入——其他 act 由 base game 控制
-            var act = combatState.RunState.Act;
-            if (act is not Act4Model && act is not Act5Model) return;
-
+            // [第二轮改造] 不再限制 act4/5——由每层的 ExtraScaling 开关决定是否生效。
             var (hpMult, _) = DifficultyMultiplierContext.GetCurrentMultipliers(
                 combatState.RunState, combatState.Encounter);
 

@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Models;
 using MegaCrit.Sts2.Core.Random;
 using MegaCrit.Sts2.Core.Unlocks;
@@ -37,12 +37,21 @@ public static class ExpandActListPatch
         {
             var list = __result.ToList();
 
+            // 幂等 + 永远在末尾：先摘掉可能已存在的自己（别的 patch 顺序不确定），再追加。
+            list.RemoveAll(a => a is Act4Model or Act5Model);
+
             if (ExtraActsBootstrap.Act4 != null) list.Add(ExtraActsBootstrap.Act4);
             if (ExtraActsBootstrap.Act5 != null) list.Add(ExtraActsBootstrap.Act5);
 
+            // ★ 兼容"第 4 幕被别的模组占用"（如 ACT 4 心脏）：检测 + 把结论打进日志。
+            //   游戏自己的 GetRandomList 会遍历 ActsByIndex 的每一层各取一个 act（IL 实证），
+            //   所以别人的第 4 幕本来就在我们前面；我们只保证自己**永远追加在末尾** ⇒ 自然成为第 5/6 幕。
+            ActLayout.Reset();
+            ActLayout.Detect();
+
             MainFile.Logger.Info(
                 $"Final act list ({list.Count}): " +
-                string.Join(" -> ", list.Select(a => a.Id.Entry)));
+                string.Join(" -> ", list.Select(a => $"{a.Id.Entry}{Label(a)}")));
 
             return list;
         }
@@ -52,4 +61,12 @@ public static class ExpandActListPatch
             return __result;
         }
     }
+
+    /// <summary>日志里给每个 act 标一个层号：本模组的两个幕标"本模组第 N 幕"（顺延后自动变 5/6）。</summary>
+    private static string Label(ActModel act) => act switch
+    {
+        Act4Model => $"#本模组第 {ActLayout.OurFirstLayer} 幕",
+        Act5Model => $"#本模组第 {ActLayout.OurSecondLayer} 幕",
+        _ => $"#{RunProgress.GetActIndexFromModel(act)}",
+    };
 }

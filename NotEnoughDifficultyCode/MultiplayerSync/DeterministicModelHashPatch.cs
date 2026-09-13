@@ -1,4 +1,4 @@
-﻿// ReSharper disable InconsistentNaming
+// ReSharper disable InconsistentNaming
 
 using System;
 using System.Collections.Generic;
@@ -214,6 +214,6 @@ public static class DeterministicModelHashPatch
                 $"({ex.Message}); falling back to current in-memory value.");
         }
 
-        return NotEnoughDifficultyConfig.DeterministicModelHash;
+        return true; // [第二轮] 恒定启用：模型哈希确定性是联机正确性的硬前提，不再提供关闭开关
     }
 }

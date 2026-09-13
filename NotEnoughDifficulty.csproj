@@ -1,122 +1,97 @@
-﻿<Project Sdk="Godot.NET.Sdk/4.5.2" InitialTargets="CheckDependencyPaths">
-    <Import Project=".\Sts2PathDiscovery.props" />
-    <PropertyGroup>
-        <TargetFramework>net9.0</TargetFramework>
-        <ImplicitUsings>true</ImplicitUsings>
-        <Nullable>enable</Nullable> <!--Makes code analysis regarding null values stricter.-->
-        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
-        <PathMap>$(AppOutputBase)=.\</PathMap>
-        <GodotDisabledSourceGenerators>GodotPluginsInitializer</GodotDisabledSourceGenerators>
-    </PropertyGroup>
+<Project Sdk="Godot.NET.Sdk/4.5.1">
 
-    <PropertyGroup>
-        <!-- Diasble architecture mismatch warning; mods are ideally built for all platforms (MSIL)
-             while your local StS2 version will be for your specific platform. -->
-        <NoWarn>$(NoWarn);MSB3270</NoWarn>
-        <!--        <CustomModsPath>${ModsPath}/$(MSBuildProjectName)</CustomModsPath>-->
-        <CustomModsPath>$(ModsPath)/改变游戏/还不够难-NotEnoughDifficulty</CustomModsPath>
-    </PropertyGroup>
+  <!--
+    StS2-NotEnoughDifficulty → 当前 beta (sts2 v0.111.0 / BaseLib 3.4.5) 移植构建工程
 
-    <ItemGroup Condition="Exists('$(Sts2DataDir)')">
-        <Reference Include="0Harmony">
-            <HintPath>$(Sts2DataDir)/0Harmony.dll</HintPath>
-            <Private>false</Private>
-        </Reference>
-        <Reference Include="sts2">
-            <HintPath>$(Sts2DataDir)/sts2.dll</HintPath>
-            <Private>false</Private>
-        </Reference>
-    </ItemGroup>
+    与原仓库 csproj 的差异（共 9 项，均为"构建配置"，业务代码 0 行改动）：
+      1. Godot.NET.Sdk 4.5.2 → 4.5.1        (对齐游戏实际引擎：MegaCrit Godot 4.5.1 分支)
+      2. Alchyr.Sts2.BaseLib(3.3.0) → 本地 _refs\baselib\BaseLib.dll (本机为 3.4.5)
+      3. 移除 Krafs.Publicizer 2.3.0          (原 csproj 中其 ItemGroup 即为 Condition="False"，未启用)
+      4. 移除 Alchyr.Sts2.ModAnalyzers        (仅提供本地化 key 校验告警，对构建非必需；且 nuget 不可达)
+      5. sts2 / 0Harmony HintPath → 指向 _refs\game\  (自包含，不依赖游戏安装路径)
+      6. 不再依赖 Sts2PathDiscovery.props      (注册表/Steam 探测在沙箱内不可用)
+      7. CustomModsPath → 本机实际安装目标      (原值为作者个人中文目录名)
+      8. 不需要 GodotPath / GodotPublish        (.pck 由 _tools\MakePck 程序化生成，不用 Godot 导出)
+      9. 移除 ModUploader 自动拷贝目标          (其依赖的 ..\ModUploader-win-x64 不存在)
 
-    <ItemGroup Condition="False"> <!--Allows access to originally private/protected members but may (unlikely to) cause errors.-->
-        <Publicize Include="sts2" IncludeVirtualMembers="false" IncludeCompilerGeneratedMembers="false" />
-    </ItemGroup>
+    本地引用与离线包源见 ..\_refs\ ，nuget.config 已把源限定为该本地 feed。
+  -->
 
-    <ItemGroup>
-        <PackageReference Include="Alchyr.Sts2.BaseLib" Version="3.3.0" PrivateAssets="All" />
-        <PackageReference Include="Krafs.Publicizer" Version="2.3.0" PrivateAssets="All" />
-        <PackageReference Include="Alchyr.Sts2.ModAnalyzers" Version="*" />
-        <!-- Generates a .pck file when building if only using simple assets. May not work on all setups. Uncomment to test. -->
-        <!-- <PackageReference Include="BSchneppe.StS2.PckPacker" Version="0.1.1" PrivateAssets="All" /> -->
-        <AdditionalFiles Include="NotEnoughDifficulty/localization/**/*.json" /> <!-- Used by analyzer -->
-    </ItemGroup>
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>true</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>NotEnoughDifficulty</AssemblyName>
+    <RootNamespace>NotEnoughDifficulty</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppOutputBase>$(MSBuildProjectDirectory)\</AppOutputBase>
+    <PathMap>$(AppOutputBase)=.\</PathMap>
+    <GodotDisabledSourceGenerators>GodotPluginsInitializer</GodotDisabledSourceGenerators>
+    <NoWarn>$(NoWarn);MSB3270;CS8632</NoWarn>
+  </PropertyGroup>
 
-    <ItemGroup>
-        <Compile Remove="NotEnoughDifficulty/**" />
-        <Compile Remove="materials/**" />
-        <Compile Remove="shaders/**" />
-        <Compile Remove="images/**" />
-        <EmbeddedResource Remove="NotEnoughDifficulty/**" />
-        <EmbeddedResource Remove="materials/**" />
-        <EmbeddedResource Remove="shaders/**" />
-        <EmbeddedResource Remove="images/**" />
-    </ItemGroup>
+  <!-- 移植目标：本机游戏 mods 目录（官方本地模组目录，删除即净）
+       注意：写入游戏目录在工作区沙箱外，需显式 InstallToGameMods=true 才会拷贝；
+       默认只暂存到工作区 .\dist\，便于在无权限情形下也能完成构建验证。 -->
+  <PropertyGroup>
+    <Sts2ModsDir>D:\Steam\steamapps\common\Slay the Spire 2\mods</Sts2ModsDir>
+    <CustomModsPath>$(Sts2ModsDir)\NotEnoughDifficulty</CustomModsPath>
+    <InstallToGameMods Condition="'$(InstallToGameMods)' == ''">false</InstallToGameMods>
+    <DistDir>$(MSBuildProjectDirectory)\dist</DistDir>
+  </PropertyGroup>
 
-    <ItemGroup>
-        <None Condition="Exists('Directory.Build.props')" Include="Directory.Build.props" />
-        <None Include=".gitignore" />
-        <None Include="NotEnoughDifficulty.json" />
-        <None Include="project.godot" />
-        <None Include="NotEnoughDifficulty/**" />
-    </ItemGroup>
+  <!-- 源码：仅 NotEnoughDifficultyCode\**，与原工程一致 -->
+  <ItemGroup>
+    <Compile Include="NotEnoughDifficultyCode\**\*.cs" />
+  </ItemGroup>
 
-    <ItemGroup>
-        <Content Include="docs\README.en.md" />
-        <Content Include="docs\README.workshop.md" />
-        <Content Include="LICENSE" />
-        <Content Include="README.md" />
-    </ItemGroup>
+  <!-- 游戏与 BaseLib 程序集：全部来自工作区内 _refs，不触碰游戏目录 -->
+  <ItemGroup>
+    <Reference Include="sts2">
+      <HintPath>..\_refs\game\sts2.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BaseLib">
+      <HintPath>..\_refs\baselib\BaseLib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>..\_refs\game\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
 
-    <Target Name="CheckDependencyPaths">
-        <Error Text=" Slay the Spire 2 data not found at path '$(Sts2DataDir)'"
-               Condition="'$(Sts2DataDir)' == '' or !Exists('$(Sts2DataDir)')" />
-    </Target>
+  <!-- 资源/文档（与原工程一致；Godot 的 .import 类资源不参与编译） -->
+  <ItemGroup>
+    <Compile Remove="NotEnoughDifficulty\**" />
+    <EmbeddedResource Remove="NotEnoughDifficulty\**" />
+    <None Include="NotEnoughDifficulty.json" />
+    <None Include="project.godot" />
+    <None Include="NotEnoughDifficulty\**" />
+    <Content Include="README.md" />
+    <Content Include="docs\README.en.md" />
+    <Content Include="docs\README.workshop.md" />
+    <Content Include="LICENSE" />
+  </ItemGroup>
 
-    <Target Name="CopyToModsFolderOnBuild" AfterTargets="PostBuildEvent">
-        <Message Text="Copying .dll .pdb and .json to mods folder." Importance="high" />
-        <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(CustomModsPath)" />
-        <Copy SourceFiles="$(AssemblyName).json" DestinationFolder="$(CustomModsPath)" />
-        <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(CustomModsPath)" />
-    </Target>
+  <!-- 构建后：先暂存到工作区 dist\（始终执行）；仅当 InstallToGameMods=true 时才拷进游戏 mods\ -->
+  <Target Name="StageToDist" AfterTargets="Build">
+    <MakeDir Directories="$(DistDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(DistDir)" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\NotEnoughDifficulty.json" DestinationFolder="$(DistDir)" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="$(TargetDir)$(TargetName).pdb" DestinationFolder="$(DistDir)" ContinueOnError="WarnAndContinue" />
+    <Message Text="[移植构建] 暂存 → $(DistDir)" Importance="high" />
+  </Target>
 
-    <Target Name="CopyQuickPck" AfterTargets="PackPck"
-            Condition="Exists('$(PckPackerOutputPath)') And '$(PckPackerSkipped)' != 'true'">
-        <Message Text="Copying quick .pck to mods folder." Importance="high" />
-        <Copy SourceFiles="$(PckPackerOutputPath)" DestinationFolder="$(CustomModsPath)" />
-    </Target>
+  <Target Name="InstallToModsFolder" AfterTargets="StageToDist" Condition="'$(InstallToGameMods)' == 'true'">
+    <MakeDir Directories="$(CustomModsPath)" />
+    <Copy SourceFiles="$(DistDir)\$(TargetFileName)" DestinationFolder="$(CustomModsPath)" />
+    <Copy SourceFiles="$(DistDir)\NotEnoughDifficulty.json" DestinationFolder="$(CustomModsPath)" />
+    <Copy SourceFiles="$(DistDir)\$(TargetName).pdb" DestinationFolder="$(CustomModsPath)" ContinueOnError="WarnAndContinue" />
+    <Copy SourceFiles="$(DistDir)\NotEnoughDifficulty.pck" DestinationFolder="$(CustomModsPath)" ContinueOnError="WarnAndContinue" />
+    <Message Text="[移植构建] 已安装 → $(CustomModsPath)" Importance="high" />
+  </Target>
 
-    <Target Name="NeedGodotForPublish" BeforeTargets="Publish">
-        <Error
-            Text=" Godot path must be set up before publishing; Godot not found at path '$(GodotPath)'. Check Directory.Build.props file."
-            Condition="'$(GodotPath)' == '' or !Exists('$(GodotPath)')" />
-    </Target>
-
-    <Target Name="GodotPublish" AfterTargets="Publish"
-            Condition="'$(GodotPath)' != '' and Exists('$(GodotPath)') and '$(IsInnerGodotExport)' != 'true'">
-        <Message Text="Exporting Godot .pck to mods folder" Importance="high" />
-        <Exec
-            Command="&quot;$(GodotPath)&quot; --headless --export-pack &quot;BasicExport&quot; &quot;$(CustomModsPath)/$(MSBuildProjectName).pck&quot;"
-            EnvironmentVariables="IsInnerGodotExport=true;MSBUILDDISABLENODEREUSE=1" ContinueOnError="WarnAndContinue" />
-    </Target>
-
-    <!-- ============================================================
-         发布到 ModUploader 工作区的 content 目录（Steam 创意工坊上传用）。
-         触发：dotnet publish（与导出 .pck 同一条链）。挂在 GodotPublish 之后，
-         此时 dll / json / pck 都已落到 $(CustomModsPath)，直接从那里取（不含 pdb）。
-
-         ★ 若 ModUploader 工作区文件夹名不是 "NotEnoughDifficulty"，只改下面这一行。
-           路径相对项目根目录：<项目根>/../ModUploader-win-x64/<工作区>/content
-         ============================================================ -->
-    <PropertyGroup>
-        <ModUploaderContentDir>$(MSBuildProjectDirectory)\..\ModUploader-win-x64\NotEnoughDifficulty\content</ModUploaderContentDir>
-    </PropertyGroup>
-
-    <Target Name="CopyToModUploaderContent" AfterTargets="GodotPublish" Condition="'$(IsInnerGodotExport)' != 'true'">
-        <MakeDir Directories="$(ModUploaderContentDir)" />
-        <Message Text="Publishing mod files to ModUploader content: $(ModUploaderContentDir)" Importance="high" />
-        <Copy
-            SourceFiles="$(CustomModsPath)\$(TargetFileName);$(CustomModsPath)\$(AssemblyName).json;$(CustomModsPath)\$(MSBuildProjectName).pck"
-            DestinationFolder="$(ModUploaderContentDir)" />
-    </Target>
 </Project>

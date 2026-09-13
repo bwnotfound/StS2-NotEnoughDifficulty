@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using HarmonyLib;
@@ -173,15 +173,16 @@ public static class ActModelFromSaveRebuildPatch
         }
     }
 
-    /// <summary>把 1+2+3 源 act 的某 encounter 池经移除过滤后去重合并（确定性顺序，无 rng）。</summary>
+    /// <summary>把 1+2+3 源 act 的某 encounter 池去重合并（确定性顺序，无 rng）。
+    /// [第二轮改造] 已去掉「敌人移除列表」过滤——该功能整体删除。</summary>
     private static List<EncounterModel> MixEncounters(Func<ActModel, IEnumerable<EncounterModel>> select)
     {
         var outp = new List<EncounterModel>();
         var seen = new HashSet<string>();
-        foreach (var act in new ActModel?[] { ModelDb.Act<Overgrowth>(), ModelDb.Act<Hive>(), ModelDb.Act<Glory>() })
+        foreach (var act in new[] { RunProgress.GetRepresentativeAct(1), RunProgress.GetRepresentativeAct(2), RunProgress.GetRepresentativeAct(3) })
         {
             if (act == null) continue;
-            foreach (var enc in ExtraActsConfig.ApplyRemovalFilter(select(act)))
+            foreach (var enc in select(act))
                 if (enc?.Id.Entry is string k && seen.Add(k))
                     outp.Add(enc);
         }

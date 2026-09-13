@@ -1,4 +1,4 @@
-﻿using BaseLib.Config;
+using BaseLib.Config;
 using BaseLib.Utils;
 using Godot;
 using HarmonyLib;
@@ -48,6 +48,25 @@ public partial class MainFile : Node
     public static Logger Logger { get; } =
         new(ModId, LogType.Generic);
 
+    /// <summary>
+    ///     诊断日志入口：**只在配置里打开「日志调试」时输出**。
+    ///
+    /// 为什么需要它：排查期我埋了大量地图结构/boss 抽取/合成节点日志，
+    /// 正常游玩时它们会把有价值的提示淹没（玩家反馈"不去烦扰正常游玩的玩家"）。
+    /// 所以：诊断日志一律走这里，错误日志（Error/Warn）仍直接输出、不受开关控制。
+    /// </summary>
+    public static void DebugLog(string message)
+    {
+        try
+        {
+            if (!NotEnoughDifficultyConfig.DebugLogging) return;
+            Logger.Info(message);
+        }
+        catch
+        {
+            // 日志失败绝不影响游戏
+        }
+    }
     public static void Initialize()
     {
         Logger.Info($"Loading {ModId} {ModVersion}");
@@ -126,6 +145,17 @@ public partial class MainFile : Node
         catch (Exception ex)
         {
             Logger.Error($"Harmony patching failed: {ex}");
+        }
+
+        // 兼容性报告：把所有"关键 patch 点上的其它 mod"打一份出来，
+        // 便于多 mod 环境下定位"功能为什么没生效"（放权逻辑见 ModCompat）。
+        try
+        {
+            ModCompat.LogCompatibilityReport();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"ModCompat report failed: {ex}");
         }
 
         // 注册全局速度控制器：每帧把 SpeedMultiplier config 同步到 Engine.TimeScale。

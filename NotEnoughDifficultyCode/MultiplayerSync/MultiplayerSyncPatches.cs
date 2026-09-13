@@ -1,4 +1,4 @@
-﻿// ReSharper disable InconsistentNaming
+// ReSharper disable InconsistentNaming
 // 抑制 IDE 关于 __instance 的命名规则警告：__instance 是 Harmony 强制约定，
 // 改成 instance 会导致 PatchAll 抛 "Parameter 'instance' not found"，整个 mod 加载失败。
 
@@ -340,7 +340,10 @@ public static class HostBroadcastConfigOnLoadPatch
 
             return ConfigSyncFlow.StartSyncOrPassthrough(
                 __instance.NetService,
-                __instance.ConnectedPlayerIds,
+                // [移植适配 v0.111.0] base game 将 LoadRunLobby.ConnectedPlayerIds 改名为
+                // PlayerIds，且返回类型由集合退化为 IEnumerable<ulong>；ToList() 以满足
+                // 下游 IReadOnlyCollection<ulong> 形参。
+                __instance.PlayerIds.ToList(),
                 // ack 成功后回调：用反射调原 BeginRunForAllPlayersIfAllReady
                 () => OriginalMethod.Invoke(__instance, null));
         }, true);
