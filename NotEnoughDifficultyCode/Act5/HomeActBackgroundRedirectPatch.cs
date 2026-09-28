@@ -56,10 +56,11 @@ internal static class HomeActBackgroundRedirectPatch
         if (!PatchScope.IsEnabled) return true;
         if (parentAct is not (Act4Model or Act5Model)) return true;   // 只管本模组的幕
 
-        // ★ 只拦截**精英**（用户口径："检测到处于 ACT 5/4 场景且为精英的时候才会走拦截，否则就放过去"）。
-        //   BOSS / 伪装BOSS（小怪房）/ 其它一律放过去 —— 本幕自己的 BOSS 场景必须保住
-        //   （踩过：不加这道判断，ACT 5/6 的 BOSS 场景被来源幕顶掉，用户实测"BOSS 场景没了"）。
-        if (!Act4FightSource.IsEliteFight()) return true;
+        // ★ 判据 = **除 BOSS 房以外的战斗都折返**（小怪 / 精英一视同仁）。
+        //   历史：最初所有战斗都折返 ⇒ 本幕 BOSS 场景被顶掉（"ACT 5/6 的 BOSS 场景没了"）；
+        //   随后收窄成"只对精英" ⇒ 又漏掉"问号里藏的小怪"（用户实测：问号小怪用的是默认荣耀背景）。
+        //   BOSS 房保留本幕场景这条红线不变。详见 <see cref="Act4FightSource.IsSourceActFight" />。
+        if (!Act4FightSource.IsSourceActFight()) return true;
 
         var source = Act4FightSource.Current();
         if (source == null || source is Act4Model or Act5Model) return true;

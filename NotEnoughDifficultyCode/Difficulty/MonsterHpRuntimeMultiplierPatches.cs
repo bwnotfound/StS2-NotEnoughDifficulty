@@ -1,4 +1,4 @@
-﻿using HarmonyLib;
+using HarmonyLib;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
 using MegaCrit.Sts2.Core.Entities.Creatures;
@@ -201,9 +201,16 @@ public static class CreatureAfterAddedToRoomSuppressPatch
 ///     因素 / 其他 mod 的 transpiler 影响），所以两层都 patch 增加鲁棒性。
 ///     计数器是嵌套的——多套一层抑制无副作用：内层 patch 进 +1 后是 2，外层 +1 后是 1，相互独立的
 ///     EnterNestedSuppression / ExitNestedSuppression 配对让 counter 永远不会负数 / 残留。
+///
+/// ⚠️ <b>必须显式给出参数类型</b>（2026-09-22 修）：<c>CombatManager.AfterCreatureAdded</c> 有**两个重载**
+/// （<c>public Task AfterCreatureAdded(Creature)</c> 与 <c>private static Task AfterCreatureAdded(Creature, CombatState)</c>），
+/// 只写方法名会让 Harmony 抛 <c>Ambiguous match</c>，整个 patch 类每次启动都被跳过
+/// —— 游戏日志里的原话：<c>Patch class ...CombatManagerAfterCreatureAddedSuppressPatch failed (skipped):
+/// HarmonyException: Ambiguous match for HarmonyMethod[...]</c>。这里钉住公开的那个单参重载。
 /// </summary>
 [HarmonyPatch(typeof(CombatManager),
-    nameof(CombatManager.AfterCreatureAdded))]
+    nameof(CombatManager.AfterCreatureAdded),
+    new[] { typeof(Creature) })]
 public static class CombatManagerAfterCreatureAddedSuppressPatch
 {
     [HarmonyPriority(Priority.High)]

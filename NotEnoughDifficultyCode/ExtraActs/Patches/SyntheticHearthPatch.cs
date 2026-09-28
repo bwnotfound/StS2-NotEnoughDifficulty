@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Map;
@@ -74,6 +74,15 @@ internal static class SyntheticHearth
         return -1;
     }
 
+    /// <summary>这个坐标是不是我们插的合成房间（供"放行原版旅行流程"之类的判定用）。</summary>
+    public static bool IsSyntheticCoord(RunState? state, MapCoord coord)
+    {
+        var map = state?.Map;
+        if (map?.SecondBossMapPoint == null) return false;
+        if (_pendingRoomCount <= 0) return false;
+        return GetRoomIndex(map, _pendingRoomCount, coord) >= 0;
+    }
+
     /// <summary>
     ///     往地图上注入合成火堆的**视觉与连通**（在 <c>NMapScreen.SetMap</c> 之后调）。
     ///     返回 false 表示条件不满足或失败（调用方无需处理，原版地图照常可用）。
@@ -83,10 +92,18 @@ internal static class SyntheticHearth
         try
         {
             var state = RunStateAccessor.GetCurrentState();
-            if (state == null) return false;
+            if (state == null)
+            {
+                MainFile.Logger.Warn("[SynthHearth] 取不到 RunState（地图界面已建好但 run state 读不到），跳过火堆注入");
+                return false;
+            }
 
             var actIdx = RunProgress.GetActIndex(state);
-            if (actIdx < 1) return false;
+            if (actIdx < 1)
+            {
+                MainFile.DebugLog($"[SynthHearth] act 认不出层号（act={state.Act?.Id?.Entry}），跳过火堆注入");
+                return false;
+            }
 
             // 只对"启用了双 boss 且真的有第二个 boss"的层动手。
             //
@@ -104,9 +121,27 @@ internal static class SyntheticHearth
             // ★ act5（本模组的传奇/神话幕）显式排除：那一幕的连战由 Act5BossSequence 自己发房推进，
             //   既没有 SecondBossMapPoint，也不该在两个 BOSS 之间夹火堆。
             //   判据用**类型**而不是层号 —— 第 4 幕被别的模组占用而顺延时，它排在第 6 幕，层号会变。
-            if (state?.Act is Act5Model) return false;
-            if (map.SecondBossMapPoint == null) return false;
-            if (!DoubleBossConfigPatch.IsDoubleBossEnabled(ActLayout.ConfigLayerOf(state?.Act, state))) return false;
+            if (state?.Act is Act5Model)
+            {
+                MainFile.DebugLog("[SynthHearth] act5：连战幕的布局自己控制，不注入合成火堆");
+                return false;
+            }
+
+            if (map.SecondBossMapPoint == null)
+            {
+                MainFile.DebugLog(
+                    $"[SynthHearth] 第 {actIdx} 层地图没有第二个 boss 点（secondBoss=无）⇒ 不存在" +
+                    "\"两个 boss 中间\"，不需要合成火堆");
+                return false;
+            }
+
+            var cfgLayer = ActLayout.ConfigLayerOf(state?.Act, state);
+            if (!DoubleBossConfigPatch.IsDoubleBossEnabled(cfgLayer))
+            {
+                MainFile.DebugLog(
+                    $"[SynthHearth] 第 {actIdx} 层（配置槽位 {cfgLayer}）的双 boss 开关是关的 ⇒ 不注入合成火堆");
+                return false;
+            }
 
             var bossNode = Traverse.Create(screen).Field("_bossPointNode").GetValue<NBossMapPoint>();
             var secondNode = Traverse.Create(screen).Field("_secondBossPointNode").GetValue<NBossMapPoint>();
@@ -133,6 +168,12 @@ internal static class SyntheticHearth
             var end = secondNode.Position + secondNode.Size * 0.5f;
 
             var types = RoomTypes;
+            if (types.Count == 0)
+            {
+                MainFile.DebugLog("[SynthHearth] 火堆与商店两个开关都关着 ⇒ 双 boss 中间什么都不插");
+                return false;
+            }
+
             var points = new List<MapPoint>();
             var nodes = new List<NNormalMapPoint>();
 
@@ -182,9 +223,13 @@ internal static class SyntheticHearth
                 MainFile.Logger.Error($"[SynthHearth] 画连线失败（火堆已注入，可能只是没线）: {ex}");
             }
 
-            MainFile.DebugLog(
-                $"[SynthHearth] 已在第 {actIdx} 层注入 {points.Count} 个合成火堆" +
-                $"（坐标 {string.Join(", ", points.Select(p => $"({p.coord.col},{p.coord.row})"))}）");
+            // ★ 这条用 Info（默认就能在日志里看到，不必开 DebugLogging）——
+            //   它是"合成火堆到底插进去了没有"的唯一权威证据。上一轮事故里正因为
+            //   成功/跳过**都只走 DebugLog**，日志里一个字都没有，才需要从头反推根因。
+            MainFile.Logger.Info(
+                $"[SynthHearth] 已在第 {actIdx} 层注入 {points.Count} 个合成节点" +
+                $"（{string.Join(" → ", points.Select(p => p.PointType.ToString()))}，" +
+                $"坐标 {string.Join(", ", points.Select(p => $"({p.coord.col},{p.coord.row})"))}）");
 
             // 5) 重算可通行性（**关键**）
             // 原版的重算发生在 SetMap 内部、**早于**本 postfix，所以刚接上的连通关系
@@ -273,21 +318,158 @@ internal static class SyntheticHearth
                 .Field("_mapPointDictionary").GetValue<Dictionary<MapCoord, NMapPoint>>();
             if (dict == null) return;
 
+            // ★ 合成节点是**网格外**的点（虚拟行 = boss 行 + 50）⇒ 原版 <c>RecalculateTravelability</c>
+            //   永远算不到它们（它只沿地图网格推导可通行点），于是节点一直是 Untravelable、
+            //   点击被原版 <c>NMapPoint.OnRelease</c> 的 IsTravelable 判定挡掉 —— 表现就是
+            //   **"双 boss 之间的火堆点不动、过不去"**（用户实测，新开一局也复现）。
+            //   所以这里不再指望原版：**满足"站在第一个 boss 节点上、且序列还没走完"时，我们自己把
+            //   状态提成 Travelable**；其余情况明确置为 Untravelable（防止残留在可点状态）。
+            var boss = map.BossMapPoint!.coord;
+            var cur = state!.CurrentMapCoord;
+            var atFirstBoss = cur != null && cur.Value.col == boss.col && cur.Value.row == boss.row;
+
             var refreshed = 0;
             for (var i = 0; i < _pendingRoomCount; i++)
             {
                 if (!dict.TryGetValue(GetCoord(map, i), out var node) || node == null) continue;
+
+                node.State = atFirstBoss ? MapPointState.Travelable : MapPointState.Untravelable;
                 InvokeInstanceNoArg(node, "RefreshState", "NMapPoint");
                 refreshed++;
             }
 
             if (refreshed > 0)
-                MainFile.DebugLog($"[Gauntlet] 已刷新 {refreshed} 个合成节点的状态");
+            {
+                MainFile.DebugLog(
+                    $"[Gauntlet] 已刷新 {refreshed} 个合成节点的状态" +
+                    $"（站在第一个BOSS={atFirstBoss} ⇒ 置为 {(atFirstBoss ? "Travelable" : "Untravelable")}）");
+
+                var states = new List<string>();
+                for (var i = 0; i < _pendingRoomCount; i++)
+                    if (dict.TryGetValue(GetCoord(map, i), out var n) && n != null)
+                        states.Add($"#{i} state={n.State}");
+                if (states.Count > 0) MainFile.DebugLog($"[SynthHearth] 节点状态: {string.Join(", ", states)}");
+            }
         }
         catch (Exception ex)
         {
             MainFile.Logger.Warn($"[Gauntlet] RefreshSyntheticTravelability 失败: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    ///     兜底拦截：**没进火堆也能进第二个 BOSS**（2026-09-22 用户要求）。
+    ///
+    /// ## 为什么必须有这道闸（原版 IL 实证）
+    /// <c>NMapScreen.RecalculateTravelability</c> 的双 BOSS 特判只认一种情况：
+    /// <code>
+    ///   V_0 = VisitedMapCoords[^1];                       // 最后一个已访问坐标
+    ///   if (_secondBossPointNode != null &amp;&amp; V_0 == _bossPointNode.Point.coord) {
+    ///       _secondBossPointNode.State = Travelable;      // ← 只有"当前正好站在第一个 BOSS 上"
+    ///       return;                                       //   才放行，且**直接 return**
+    ///   }
+    /// </code>
+    /// 也就是说：
+    /// <list type="number">
+    ///   <item><b>跳过火堆</b>（从第一个 BOSS 直接点第二个 BOSS）时靠这条特判 —— 一旦地图/连线/顺序
+    ///         有任何一处不对（别的 mod 改地图、注入失败、读档重建），第二个 BOSS 就停在
+    ///         <c>Untravelable</c> ⇒ 进不去 ⇒ **卡死在两个 BOSS 之间**；</item>
+    ///   <item><b>进了火堆再出来</b>时，"最后一个已访问坐标"是火堆的**网格外虚拟坐标**，
+    ///         特判不成立，只能落到 <c>MapTravel.GetTravelablePointsFrom(火堆点)</c>，
+    ///         而这个函数是给网格内节点设计的，**不保证**对网格外点给出结果 ⇒ 同样可能点不到第二个 BOSS。</item>
+    /// </list>
+    /// 所以这里不再指望原版：**只要双 BOSS 序列"进行中"（当前坐标 = 第一个 BOSS，或 = 我们插的任一
+    /// 合成节点），就把第二个 BOSS 显式置为 <c>Travelable</c>**。只加不删，原版本来放行的情况重复置一次，无副作用。
+    ///
+    /// 调用点：① 每次 <c>RecalculateTravelability</c> 之后；② 地图每次打开；
+    /// ③ <c>NMapPoint.OnRelease</c> 前缀（点击那一刻的硬拦截，见 <see cref="TryAllowSecondBossClick" />）。
+    /// </summary>
+    public static bool EnsureSecondBossReachable(NMapScreen screen)
+    {
+        try
+        {
+            var state = RunStateAccessor.GetCurrentState();
+            if (!IsBetweenBosses(state)) return false;
+
+            var node = Traverse.Create(screen).Field("_secondBossPointNode").GetValue<NBossMapPoint>();
+            if (node == null) return false;
+
+            return ForceTravelable(node, "序列进行中");
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[Gauntlet] 第二个 BOSS 兜底失败: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    ///     点击那一刻的硬拦截（挂 <c>NMapPoint.OnRelease</c> 前缀）。
+    ///
+    /// <c>OnRelease</c> 的 IL 第一行就是 <c>if (!IsTravelable) return;</c> —— 只要在它执行之前把
+    /// "第二个 BOSS 节点"的状态提成 <c>Travelable</c>，这一击就不会被吞掉
+    /// （即便别的 mod / 别的时序把它翻回 <c>Untravelable</c>）。
+    /// </summary>
+    public static bool TryAllowSecondBossClick(NMapPoint? node)
+    {
+        try
+        {
+            if (node?.Point == null) return false;
+
+            var state = RunStateAccessor.GetCurrentState();
+            var second = state?.Map?.SecondBossMapPoint?.coord;
+            if (second == null) return false;
+            if (!IsBetweenBosses(state)) return false;
+            if (node.Point.coord != second.Value) return false;      // 只有"第二个 BOSS 节点"走这条
+
+            return ForceTravelable(node, "点击瞬间");
+        }
+        catch
+        {
+            return false;   // 兜底失败就当没发生，绝不影响原版点击流程
+        }
+    }
+
+    /// <summary>
+    ///     双 BOSS 序列是否"进行中"：当前坐标 = 第一个 BOSS，或 = 我们插的任一合成节点。
+    ///     只有在这个窗口里才做"没进火堆也放行"的兜底（其它时候一律不碰原版状态）。
+    /// </summary>
+    public static bool IsBetweenBosses(RunState? state)
+    {
+        try
+        {
+            var map = state?.Map;
+            if (map?.SecondBossMapPoint == null || map.BossMapPoint == null) return false;
+
+            var cur = state!.CurrentMapCoord;
+            if (cur == null) return false;
+            var c = cur.Value;
+
+            var boss = map.BossMapPoint.coord;
+            if (c.col == boss.col && c.row == boss.row) return true;      // 站在第一个 BOSS 上（常规路线）
+
+            // 站在合成节点（火堆/商店）上 —— 此时原版算不出第二个 BOSS 可通行，正是要兜底的场景
+            var count = Math.Max(_pendingRoomCount, RoomTypes.Count);
+            return count > 0 && GetRoomIndex(map, count, c) >= 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>把节点状态提成可点（已经可点就什么都不做）。</summary>
+    private static bool ForceTravelable(NMapPoint node, string why)
+    {
+        if (node.State == MapPointState.Travelable) return false;
+
+        var was = node.State;
+        node.State = MapPointState.Travelable;
+        InvokeInstanceNoArg(node, "RefreshState", "NMapPoint");
+
+        MainFile.Logger.Info(
+            $"[Gauntlet] 兜底放行：第二个 BOSS 节点由 {was} 提为 Travelable（{why}）—— 没进火堆也能进 BOSS");
+        return true;
     }
 
     /// <summary>第一个 boss 奖励界面点"继续"时调用（BossGauntlet 在这里推进到合成房间）。</summary>
@@ -322,12 +504,42 @@ internal static class SyntheticHearth
         var index = GetRoomIndex(map, types.Count, coord);
         if (index < 0) return false;
 
-        var actFloor = coord.row + 1;
+        var actFloor = EntryFloor(map);
         MainFile.DebugLog(
-            $"[Gauntlet] 进入合成房间 index={index} coord=({coord.col},{coord.row}) type={types[index]}");
+            $"[Gauntlet] 进入合成房间 index={index} coord=({coord.col},{coord.row}) " +
+            $"type={types[index]} actFloor={actFloor}（虚拟行 {coord.row} 不可直接当层数）");
 
         result = rm.EnterMapPointInternal(actFloor, types[index], null, true);
         return result != null;
+    }
+
+    /// <summary>
+    ///     合成房间该用哪个"层数"（actFloor）。
+    ///
+    /// ## 为什么不能直接用 <c>coord.row + 1</c>（2026-09-23 修：act4 火堆进入即卡死）
+    /// 合成坐标是**网格外虚拟坐标**：<c>row = SecondBossMapPoint.row + 50</c>（见 <see cref="GetCoord" />），
+    /// 典型值 63~68。而 <c>RunManager.EnterMapPointInternal(actFloor, …)</c> 的内部实现
+    /// （IL 实证）第一件事就是：
+    /// <code>
+    ///   IL_006F: ldfld  &lt;EnterMapPointInternal&gt;d__192::actFloor
+    ///   IL_0074: callvirt RunState::set_ActFloor(Int32)      // ← 直接写进 run state
+    /// </code>
+    /// 于是进一次火堆，<c>RunState.ActFloor</c> 就被写成 64~68 —— 而 ActFloor 是**难度公式的输入**
+    /// （<see cref="RunProgress.GetHpMultiplier" />）以及原版其它按层逻辑的输入：
+    /// <list type="bullet">
+    ///   <item>修正前的公式（<c>1+floor*0.1*Y/100</c>）会把后面所有战斗的倍率抬到 1.06+；</item>
+    ///   <item>修正后的公式（<c>1+floor*0.1*Y</c>）会直接变成 <b>7 倍以上</b> —— 第二个 BOSS 瞬间不可打；</item>
+    ///   <item>act4/act5 还会被别的按层判定的 mod（进阶类）读到这个假层数。</item>
+    /// </list>
+    /// ⇒ 必须给一个**与原版同口径**的层数：用第二个 BOSS 节点的行号（它就是"火堆所在的那一层"），
+    /// 取不到时退回第一个 BOSS 的行号；<c>+1</c> 与原版 <c>point.coord.row + 1</c> 的算法一致。
+    /// </summary>
+    private static int EntryFloor(ActMap map)
+    {
+        var row = map.SecondBossMapPoint?.coord.row
+                  ?? map.BossMapPoint?.coord.row
+                  ?? 0;
+        return row + 1;
     }
 
     /// <summary>读档若停在合成节点上 → 恢复（返回 false 表示无需接管）。</summary>
@@ -344,7 +556,7 @@ internal static class SyntheticHearth
         if (index < 0) return false;
 
         MainFile.DebugLog($"[Gauntlet] 读档落在合成房间 index={index}，按原版流程恢复");
-        result = rm.EnterMapPointInternal(coord.row + 1, types[index], null, false);
+        result = rm.EnterMapPointInternal(EntryFloor(map), types[index], null, false);
         return result != null;
     }
 

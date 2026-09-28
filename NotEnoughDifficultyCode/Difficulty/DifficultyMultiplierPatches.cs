@@ -174,15 +174,37 @@ public static class MonsterHpMultiplierPatch
             var runState = state.RunState;
             if (runState == null) return;
 
+            // 具体 RunState（ActFloor / Act 都在这上面；IRunState 上没有）
+            var rs = runState as RunState;
+            var configLayer = ActLayout.ConfigLayerOf(rs?.Act, rs);
+
             // 注意：DifficultyMultiplierContext 在每个 creature 上算出来的 mult 是相同的
             // （取决于 state.Act / state.Map / state.CurrentMapCoord / encounter，跟 creature 个体无关）。
             // 算一次即可，然后给所有 enemy 应用。
             var (hpMult, _) = DifficultyMultiplierContext.GetCurrentMultipliers(
                 runState, state.Encounter);
 
-            if (Math.Abs(hpMult - 1.0) < 1e-6) return;
+            if (Math.Abs(hpMult - 1.0) < 1e-6)
+            {
+                // 没缩放的**原因**要说清楚，否则玩家只能看到"血量没变"（用户反馈 2026-09-27：
+                // "强化没有正确启用，血量依旧不变"）。每个 (act, 开关) 组合只报一次，不刷屏。
+                var skipKey = $"a{RunProgress.GetActIndex(rs)}|sw{(RunProgress.IsExtraScalingEnabled(configLayer) ? 1 : 0)}";
+                if (skipKey != _lastSkipKey)
+                {
+                    _lastSkipKey = skipKey;
+                    MainFile.Logger.Info(
+                        $"[难度] 本场**不缩放**血量：act={RunProgress.GetActIndex(rs)}" +
+                        $"（配置槽位 {configLayer}，强化开关=" +
+                        $"{(RunProgress.IsExtraScalingEnabled(configLayer) ? "开" : "**关**")}）" +
+                        $"ActFloor={rs?.ActFloor ?? 0} HpScaleFactor={NotEnoughDifficultyConfig.HpScaleFactor}" +
+                        " —— 若要本层强化，请在设置里打开对应层的『额外强化』开关");
+                }
+
+                return;
+            }
 
             var mult = (decimal)hpMult;
+            var applied = 0;
 
             foreach (var creature in state.Creatures)
             {
@@ -197,9 +219,30 @@ public static class MonsterHpMultiplierPatch
 
                 creature.SetMaxHpInternal(scaled);
                 creature.SetCurrentHpInternal(scaled);
+                applied++;
+            }
+
+            // ★ Info 级（默认可见）：让"强化到底有没有生效、生效了多少"一眼可查 ——
+            //   之前是静默的，玩家只能靠看怪的血量猜（用户："强化没有正确启用，血量依旧不变"）。
+            //   同一个 (act, ActFloor) 只报一次：一层里每场都刷就没法看了。
+            var logKey = $"a{RunProgress.GetActIndex(rs)}|f{rs?.ActFloor ?? 0}|x{hpMult:F2}";
+            if (logKey != _lastAppliedKey)
+            {
+                _lastAppliedKey = logKey;
+                MainFile.Logger.Info(
+                    $"[难度] 血量强化已应用：act={RunProgress.GetActIndex(rs)}" +
+                    $"（配置槽位 {configLayer}）ActFloor={rs?.ActFloor ?? 0}" +
+                    $" ⇒ 血量 ×{hpMult:F2}，本场 {applied} 个敌人" +
+                    $"（HpScaleFactor={NotEnoughDifficultyConfig.HpScaleFactor}）");
             }
         });
     }
+
+    /// <summary>上一次"已应用"日志的键（避免同一层每场都刷屏）。</summary>
+    private static string? _lastAppliedKey;
+
+    /// <summary>上一次"未缩放"日志的键（每个 act + 开关组合只报一次）。</summary>
+    private static string? _lastSkipKey;
 }
 
 /// <summary>

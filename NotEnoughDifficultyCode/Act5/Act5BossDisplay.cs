@@ -128,31 +128,70 @@ internal static class Act5BossDisplay
             var defeated = RunProgress.GetDefeatedEncounterIdsBeforeCurrentAct(state);
             var rng = new Rng(state.Rng.Seed, RngStreamName);
 
+            // 本次编排已经选中的（防止"同一个 boss 在同一幕里出现两次"——整幕模组会把同一个 boss
+            // 注册进多层池，所以只按层去重是不够的）。
+            var chosen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            bool Pickable(EncounterModel? e) =>
+                e?.Id?.Entry is { } id && !defeated.Contains(id) && !chosen.Contains(id);
+
+            /// 跨层汇总的"没打过且还没被选中"的池（某层用尽时的兜底）。
+            List<EncounterModel> GlobalUnvisited() =>
+                pools.SelectMany(p => p)
+                     .Where(Pickable)
+                     .GroupBy(e => e!.Id.Entry, StringComparer.OrdinalIgnoreCase)
+                     .Select(g => g.First())
+                     .ToList();
+
+            // ★ 2026-09-23 修（用户："之前打过的 BOSS 在第五幕重新出现了"）：
+            //   旧实现的兜底是"该层全池随机"，等于**把打过的 boss 又抽一遍**。
+            //   现在的优先序：本层没打过 → **全局没打过**（跨层兜底）→ 全部打过才允许重复（并打 Warn）。
             List<EncounterModel> Unvisited(int layer)
             {
                 var pool = layer - 1 < pools.Count ? pools[layer - 1] : new List<EncounterModel>();
-                var list = pool.Where(e => e?.Id?.Entry is { } id && !defeated.Contains(id)).ToList();
+                var list = pool.Where(Pickable).ToList();
+                if (list.Count > 0) return list;
 
-                if (list.Count == 0 && pool.Count > 0)
+                var global = GlobalUnvisited();
+                if (global.Count > 0)
                 {
                     MainFile.Logger.Warn(
-                        $"[Act5] 第 {layer} 层的 boss 全都打过（{pool.Count} 个），回退成该层全池随机");
-                    list = pool.ToList();
+                        $"[Act5] 第 {layer} 层没打过的 boss 已用尽（该层池 {pool.Count} 个）" +
+                        $"⇒ 改从**全局没打过**的池里抽（{global.Count} 个），避免重复已打过的 BOSS");
+                    return global;
                 }
 
-                return list;
+                MainFile.Logger.Warn(
+                    $"[Act5] 本局所有层的 boss 都已经打过了 ⇒ 第 {layer} 层只能回退成重复抽取" +
+                    "（已尽量避开本幕已选中的那几个）");
+                return pool.Where(e => e?.Id?.Entry is { } id && !chosen.Contains(id)).ToList();
             }
 
-            EncounterModel? PickFrom(List<EncounterModel> list) =>
-                list.Count > 0 ? list[rng.NextInt(0, list.Count)] : null;
+            EncounterModel? PickFrom(List<EncounterModel> list)
+            {
+                if (list.Count == 0) return null;
+
+                var picked = list[rng.NextInt(0, list.Count)];
+                if (picked?.Id?.Entry is { } id) chosen.Add(id);   // 记入本幕已选，防止幕内重复
+                return picked;
+            }
 
             if (!extreme)
             {
-                // ── 考验：一层随机 + 二层随机，最终BOSS = 三层当前分配的那个 ──
+                // ── 考验：一层随机 + 二层随机，最终BOSS 优先"第 3 层没打过的" ──
                 _hearthsBetween = false;
+
+                // ★ 2026-09-23 修：旧写法 `_finale = Act3FinalBoss(state)` 直接取
+                //   "第 3 层当前分配的那个 boss" —— 而玩家在第 3 幕**已经亲手打过它**，
+                //   于是最终 BOSS 必然重复（实测：第 3 幕 GLORY 的 boss = DOORMAKER_BOSS，
+                //   第 5 幕的最终 BOSS 又抽到 DOORMAKER_BOSS）。
+                //   现在与极限档同口径：**先从"第 3 层没打过"的池里抽**（该层空了会自动改用全局没打过的池），
+                //   只有"本局所有 boss 都打过了"才退回 <see cref="Act3FinalBoss" />。
+                var finalePool = Unvisited(3);
+                _finale = PickFrom(finalePool) ?? Act3FinalBoss(state);
+
                 Add(PickFrom(Unvisited(1)), 1);
                 Add(PickFrom(Unvisited(2)), 2);
-                _finale = Act3FinalBoss(state);
 
                 LogPlan(extreme);
                 return;
@@ -181,13 +220,28 @@ internal static class Act5BossDisplay
             }
 
             // 循环 1→2→3→1→2→3…（某层空了就跳过它）
+            //
+            // ⚠️ 2026-09-23：这一圈改成**有硬上限**的循环 + 幕内去重。原写法
+            //   `for (i=0; Disguised.Count < Max; i++) { if (cursor 越界) continue; ... }`
+            //   在"所有层都抽完但 Disguised 还没到上限"时靠 `anyLeft` 的 break 收工 ——
+            //   一旦我们在里面加了"跳过已选过的"分支，continue 就可能**永远转下去**（卡死主线程）。
+            //   这里给出总步数上限，任何异常输入都退化成"少放几场"，绝不进死循环。
             var cursor = new int[3];
-            for (var i = 0; Disguised.Count < MaxDisguised; i++)
+            var totalCandidates = layers[0].Count + layers[1].Count + layers[2].Count;
+            var maxSteps = (totalCandidates + 1) * 3 + 6;
+
+            for (var step = 0; step < maxSteps && Disguised.Count < MaxDisguised; step++)
             {
-                var layer = i % 3;
+                var layer = step % 3;
                 if (cursor[layer] >= layers[layer].Count) continue;
 
-                Disguised.Add(layers[layer][cursor[layer]++]);
+                var candidate = layers[layer][cursor[layer]++];
+                if (candidate == null) continue;      // 池里理论不该有 null；有就跳过，别把 null 塞进名单
+
+                // 幕内去重：整幕模组会把同一个 boss 注册进多层池 ⇒ 只按层去重是不够的
+                if (candidate.Id?.Entry is { } cid && !chosen.Add(cid)) continue;
+
+                Disguised.Add(candidate);
 
                 // 全空 → 收工
                 var anyLeft = false;

@@ -108,6 +108,18 @@ void fragment() {
 
             _shimmerShader ??= new Shader { Code = ShimmerShaderCode };
 
+            // ★ 编译自检：着色器代码是**运行时字符串**，语法错了 Godot 只在控制台报错、不抛异常；
+            //   而 Material 一旦挂上去、编译失败时地图底图可能整块不渲染。
+            //   所以先问一次 uniform 列表：本 shader 有一堆 uniform，返回空 = 没编译成功 ⇒
+            //   宁可不挂（回退原版渲染），也不赌一个可能全黑的底图。
+            if (_shimmerShader == null || _shimmerShader.GetShaderUniformList().Count == 0)
+            {
+                MainFile.Logger.Warn(
+                    "[Theme] 金光流动着色器未通过编译校验（uniform 列表为空），跳过挂载 —— 地图保持原版渲染");
+                _shimmerShader = null;      // 下次进来重新构造
+                return;
+            }
+
             var attached = 0;
             foreach (var name in new[] { "_mapTop", "_mapMid", "_mapBot" })
             {
@@ -135,7 +147,7 @@ void fragment() {
                 attached++;
             }
 
-            MainFile.DebugLog($"[Theme] 金光流动已挂到 {attached} 层地图背景（神话档={myth}）");
+            MainFile.Logger.Info($"[Theme] 金光流动已挂到 {attached} 层地图背景（神话档={myth}）");
         }
         catch (Exception ex)
         {

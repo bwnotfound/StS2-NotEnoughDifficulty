@@ -138,9 +138,10 @@ public class Act4Model : CustomActModel
         // 本场来源 = **该敌人自己所属的 act**（由当前房间解析，见 Act4FightSource.Current）。
         // 不按"层"取代表 act —— 同一层可能有多个 act（层 1 = Overgrowth / Underdocks），
         // 那样两个子变体会长得一模一样（用户实测反馈）。
-        // ⚠️ **只对精英生效**：BOSS / 其它房间一律用本幕自己的默认背景 ——
+        // ⚠️ **只对"非 BOSS 房"生效**（小怪 / 精英都算）：BOSS 房一律用本幕自己的默认背景 ——
         //    否则本幕的 BOSS 场景会被来源幕顶掉（用户实测："ACT 5/6 的 BOSS 场景没了"）。
-        var source = Act4FightSource.IsEliteFight() ? Act4FightSource.Current() : null;
+        //    （2026-09-27 修正：早先只放行精英，导致"问号里藏的小怪"仍是默认荣耀背景。）
+        var source = Act4FightSource.IsSourceActFight() ? Act4FightSource.Current() : null;
 
         // ⚠️ 防自我递归（踩过：日志 9.7MB 刷屏 → 崩溃）：
         //    本 act 是"聚合 act"（池子 = 第三层所有 act 的并集），一旦来源被解析成自己，

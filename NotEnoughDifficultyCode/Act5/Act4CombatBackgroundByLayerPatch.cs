@@ -46,28 +46,43 @@ internal static class Act4FightSource
     internal static int Layer;
 
     /// <summary>
-    ///     这一场是不是**精英战**（用户口径："检测到处于 ACT 5/4 场景且为精英的时候才会走拦截，否则就放过去"）。
+    ///     这一场要不要按"敌人自己的那一幕"取背景。
     ///
-    /// ⚠️ 为什么必须区分：背景折返会把 `parentAct` 换成"敌人自己的幕"，
-    ///    对精英是本意（精英就该带来源幕的场景），但**对本幕自己的 BOSS 是灾难** ——
-    ///    BOSS 场景会被来源幕顶掉（用户实测："ACT 5/6 的 BOSS 场景没了"）。
-    ///    所以只有精英才走拦截，BOSS / 伪装BOSS（小怪房）/ 其它一律放过去。
+    /// ## 历史（两个方向都踩过，别退回旧结论）
+    /// <list type="number">
+    ///   <item>最初**所有战斗**都折返 ⇒ 本幕自己的 BOSS 场景被来源幕顶掉
+    ///         （用户实测："ACT 5/6 的 BOSS 场景没了"）；</item>
+    ///   <item>于是收窄成**只对精英**折返 ⇒ 又漏掉了"问号里藏的小怪"
+    ///         （用户实测 2026-09-27："四层遭遇问号，问号藏小怪的背景不是属于其所属楼层的背景，
+    ///         而是默认的荣耀背景"）。</item>
+    /// </list>
+    ///
+    /// ## 现在的判据：**除 BOSS 房以外的战斗都按来源幕**（小怪 / 精英一视同仁）
+    /// <list type="bullet">
+    ///   <item>BOSS 房（含本幕最终 BOSS）<b>保留本幕自己的场景</b> —— 第 1 条教训的红线；</item>
+    ///   <item>act5 的"伪装 BOSS"是**小怪房**（<c>RoomType.Monster</c>），按设计本来就该用它们
+    ///         自己那一幕的场景与 BGM（见 <see cref="Act5Model" /> 注释："背景也会跟着它的
+    ///         EncounterModel.CreateBackground 走（和 act4 精英一致）"）⇒ 也会折返，符合原意。</item>
+    /// </list>
     /// </summary>
-    internal static bool IsEliteFight()
+    internal static bool IsSourceActFight()
     {
         try
         {
             var state = RunStateAccessor.GetCurrentState();
 
             if (state?.CurrentRoom is CombatRoom room && room.Encounter != null)
-                return room.Encounter.RoomType == RoomType.Elite;
+                return room.Encounter.RoomType != RoomType.Boss;
 
-            // 兜底：房间信息还没就绪时看地图点类型
-            return state?.CurrentMapPoint?.PointType == MapPointType.Elite;
+            // 兜底：房间信息还没就绪时看地图点类型（BOSS 点不折返）
+            var pointType = state?.CurrentMapPoint?.PointType;
+            if (pointType != null) return pointType != MapPointType.Boss;
+
+            return false;      // 判不出来就不折返：宁可少切，也不能顶掉 BOSS 场景
         }
         catch
         {
-            return false;      // 判不出来就不拦截，宁可少切也不能顶掉 BOSS 场景
+            return false;
         }
     }
 

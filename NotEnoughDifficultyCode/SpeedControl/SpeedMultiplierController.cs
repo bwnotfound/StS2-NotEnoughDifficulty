@@ -1,4 +1,4 @@
-﻿using Godot;
+using Godot;
 
 namespace NotEnoughDifficulty.NotEnoughDifficultyCode;
 
@@ -100,6 +100,21 @@ public static class SpeedMultiplierController
     /// <summary>
     ///     每帧由 SceneTree 触发。极轻量：两次 double 比较 + 偶尔一次赋值。
     ///     不能抛——signal callback 抛会污染 Godot 主循环。整段包 try/catch 兜底。
+    ///
+    /// ## ★ 2026-09-23 修：「进火堆后直接卡死」的元凶之一（不跟定帧 mod 抢 TimeScale）
+    /// 旧实现是**每帧无条件**把 <c>Engine.TimeScale</c> 拉回自己的目标值。别的做"定帧 / hit-stop"
+    /// 的 mod 会在这段时间把 TimeScale 置 0，于是变成**每帧互相覆盖**的拉锯：
+    /// <code>
+    /// [HitStop] 检测到 TimeScale 被修改为 1.4，强制恢复为 0     ← 实测日志里成片出现
+    /// [HitStop] 检测到 TimeScale 被修改为 1.4，强制恢复为 0
+    /// </code>
+    /// 拉锯的后果不只是日志刷屏：**一旦 0 留在引擎里**，Godot 的 <c>Tween</c> / <c>SceneTreeTimer</c> /
+    /// <c>AnimationPlayer</c> 全部停摆（它们都乘 TimeScale），而"进房 / 进火堆"的演出正是靠这些推进的
+    /// ⇒ 画面停住不动 = 玩家说的"直接卡死"（输入还在，但流程永远走不完）。
+    ///
+    /// 现在的策略：**别人定帧（TimeScale ≤ <see cref="MinTimeScale" />）时一律不抢**，
+    /// 让 hit-stop 正常播完、由它自己恢复；只在"定帧持续超过 <see cref="UnwedgeMs" /> 毫秒"
+    /// （= 对面没恢复，游戏真的被卡在 0）时才强制拉回目标值并打一条 Warn 兜底。
     /// </summary>
     private static void OnProcessFrame()
     {
@@ -118,11 +133,47 @@ public static class SpeedMultiplierController
                 target = 1.0;
             }
 
-            if (Math.Abs(Engine.TimeScale - target) > Epsilon) Engine.TimeScale = target;
+            var current = Engine.TimeScale;
+
+            // ① 有人在做定帧（TimeScale 被压到 ~0）：**不抢**，只计时
+            if (current <= MinTimeScale && Math.Abs(target - current) > Epsilon)
+            {
+                var now = Time.GetTicksMsec();
+                if (_frozenSinceMsec == 0)
+                {
+                    _frozenSinceMsec = now;
+                    MainFile.DebugLog(
+                        $"[Speed] 检测到定帧（TimeScale={current:F3}）⇒ 暂停接管，等对面恢复");
+                    return;
+                }
+
+                // ② 兜底：定帧久到不像定帧（对面没恢复）⇒ 强制拉回，避免整个游戏停摆
+                if (now - _frozenSinceMsec > UnwedgeMs)
+                {
+                    _frozenSinceMsec = 0;
+                    Engine.TimeScale = target;
+                    MainFile.Logger.Warn(
+                        $"[Speed] 定帧持续超过 {UnwedgeMs} ms（TimeScale 停在 {current:F3}）⇒ 强制恢复到 {target:F2}" +
+                        "（防止游戏时间被永久冻住）");
+                }
+
+                return;
+            }
+
+            _frozenSinceMsec = 0;
+
+            // ③ 常规：只在目标值确实不同时写一次（配置改动 < 16ms 内生效）
+            if (Math.Abs(current - target) > Epsilon) Engine.TimeScale = target;
         }
         catch (Exception ex)
         {
             MainFile.Logger.Error($"SpeedMultiplierController.OnProcessFrame failed: {ex}");
         }
     }
+
+    /// <summary>定帧开始的时刻（ms）；0 = 当前没有定帧。</summary>
+    private static ulong _frozenSinceMsec;
+
+    /// <summary>定帧持续多久就认为"对面没恢复、必须兜底"（毫秒）。正常 hit-stop 远小于它。</summary>
+    private const double UnwedgeMs = 3000.0;
 }

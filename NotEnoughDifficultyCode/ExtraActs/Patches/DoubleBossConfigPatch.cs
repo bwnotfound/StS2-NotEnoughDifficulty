@@ -47,10 +47,20 @@ public static class DoubleBossConfigPatch
 
         PatchScope.Run(nameof(DoubleBossConfigPatch), () =>
         {
-            // 兼容性放权：房间生成上有别的 mod 在动手时，不确定它的 act/池子怎么改的，
-            // 我们不去抢第二个 boss 的分配权（宁可本功能不生效，也不产生互相覆盖的怪现象）。
-            if (ModCompat.SomeoneElsePatchesRoomGeneration("双 boss 分配"))
-                return;
+            // ★ 这里**不再"有人在改 GenerateRooms ⇒ 整套放权"**（2026-09-22「叫醒」）。
+            //
+            //   真因：Ascension100（工坊 3801607408）的 `Ascension18.DoubleBossPlus` 也 patch 了
+            //   `RunManager.GenerateRooms`，于是本补丁连同 <see cref="N10DoubleBossAtAct3Patch" />
+            //   一起被放权跳过 ⇒ 玩家开了 Act1/2/4_DoubleBoss 也**一个双 boss 都不会有**
+            //   （还能看到双 boss，是因为 RunManager.GenerateMap 前缀那条补救路径没放权）。
+            //
+            //   为什么可以共存（两边都是"礼让型"）：
+            //     · 我们：本层**已经有**第二个 boss 就跳过（见下面 `if (act.HasSecondBoss)`）；
+            //     · Ascension100 A18：`act.HasSecondBoss` 为真时返回 Unchanged。
+            //   谁先跑都收敛到同一个结果：开关开的层由我们放，A18 只补它自己那一层（第二幕）。
+            //   本补丁 `[HarmonyPriority(LowerThanNormal)]`（300）跑在 A18 的 Normal（400）**之前**，
+            //   所以我们放完它就让位。
+            ModCompat.NoteCoexistence("双 boss 分配", ModCompat.RoomGenerationTarget);
 
             var state = RunStateAccessor.GetState(__instance);
             if (state?.Acts == null) return;
@@ -70,7 +80,6 @@ public static class DoubleBossConfigPatch
                 //   ⚠️ 配置槽位用 ActLayout.ConfigLayerOf：本模组的两个幕永远读 4/5 号开关
                 //   （第 4 幕被心脏模组占用而顺延时，开关不会跑去管别人的幕）。
                 var actIdx = ActLayout.ConfigLayerOf(act, state);
-                if (actIdx < 1) continue;
                 if (actIdx < 1) continue;
                 if (!IsDoubleBossEnabled(actIdx)) continue;
 

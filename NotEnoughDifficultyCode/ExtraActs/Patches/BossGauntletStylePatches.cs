@@ -1,4 +1,4 @@
-﻿using System.Reflection;
+using System.Reflection;
 using Godot;
 using HarmonyLib;
 using MegaCrit.Sts2.Core.Map;
@@ -39,6 +39,12 @@ namespace NotEnoughDifficulty.NotEnoughDifficultyCode;
 /// | `RunManagerLoadIntoLatestMapCoordPrefix` | 同名 | 读档落在合成节点上 |
 /// | `NRestSiteRoomOnProceedButtonReleasedPrefix` | 同名 | 离开火堆收尾 |
 /// | `NMerchantRoomHideScreenPrefix` | 同名 | 离开商店收尾 |
+///
+/// ## 本模组额外加的一道闸（BossGauntlet 没有）
+/// | 本文件 | 作用 |
+/// |---|---|
+/// | `NMapPointOnReleasePrefix` | **没进火堆也能进第二个 BOSS**：`OnRelease` 第一行就是 `if (!IsTravelable) return;`，
+/// 这里在它之前把第二个 BOSS 节点提成 `Travelable`（见 <see cref="SyntheticHearth.TryAllowSecondBossClick" />） |
 /// </summary>
 [HarmonyPatch]
 public static class BossGauntletStylePatches
@@ -68,6 +74,19 @@ public static class BossGauntletStylePatches
                 $"商店={NotEnoughDifficultyConfig.InterBossShop} | " +
                 $"本模组幕位=第 {ActLayout.OurFirstLayer}/{ActLayout.OurSecondLayer} 幕" +
                 $"（第 4 幕占用者：{ActLayout.ForeignAct4?.Id?.Entry ?? "无"}）");
+
+            // ★ Info 级：把**难度强化**的生效口径逐层打出来 —— 玩家反馈"强化没有正确启用、
+            //   血量不变"时，这一行就能立刻区分"开关没开（含设置界面没保存）"与"开关开了却没生效"。
+            MainFile.Logger.Info(
+                "[难度] 本局强化开关: " +
+                $"act1={NotEnoughDifficultyConfig.Act1_ExtraScaling} " +
+                $"act2={NotEnoughDifficultyConfig.Act2_ExtraScaling} " +
+                $"act3={NotEnoughDifficultyConfig.Act3_ExtraScaling} " +
+                $"act4(本模组第1幕)={NotEnoughDifficultyConfig.Act4_ExtraScaling} " +
+                $"act5(本模组第2幕)={NotEnoughDifficultyConfig.Act5_ExtraScaling} " +
+                $"| 血量系数Y={NotEnoughDifficultyConfig.HpScaleFactor} " +
+                $"攻击系数X={NotEnoughDifficultyConfig.DmgScaleFactor} " +
+                "（血量 = 1 + ActFloor×0.1×Y；攻击 = 1 + ActFloor×0.05×X）");
         });
     }
 
@@ -119,6 +138,37 @@ public static class BossGauntletStylePatches
                 }
             }
 
+            // ★ 不变量兜底（2026-09-23）：同一层的第二个 boss **绝不能等于第一个**，
+            //   否则第二场就是"再打一遍第一个 BOSS"（用户实测：act4 连续两场 KNOWLEDGE_DEMON_BOSS）。
+            //   这里在建图前做一次最终校验：撞了就换池里第一个别的；池里没有别的才只能重复（并 Warn）。
+            if (act != null && act.HasSecondBoss)
+            {
+                var firstId = act.BossEncounter?.Id?.Entry;
+                var secondId = act.SecondBossEncounter?.Id?.Entry;
+
+                if (firstId != null && string.Equals(firstId, secondId, StringComparison.Ordinal))
+                {
+                    var alt = (act.AllBossEncounters ?? Enumerable.Empty<MegaCrit.Sts2.Core.Models.EncounterModel>())
+                        .Where(b => b?.Id?.Entry is { } id && id != firstId)
+                        .OrderBy(b => b.Id.Entry, StringComparer.Ordinal)
+                        .ToList();
+
+                    if (alt.Count > 0)
+                    {
+                        act.SetSecondBossEncounter(alt[0]);
+                        MainFile.Logger.Warn(
+                            $"[DoubleBoss] 第 {actIdx} 层的第二 boss 与首个相同（'{firstId}'）" +
+                            $"⇒ 建图前改设为 '{alt[0].Id.Entry}'（否则第二个 BOSS 会重复第一个）");
+                    }
+                    else
+                    {
+                        MainFile.Logger.Warn(
+                            $"[DoubleBoss] 第 {actIdx} 层的第二 boss 与首个相同（'{firstId}'），" +
+                            "且该层池里没有别的候选 ⇒ 只能重复");
+                    }
+                }
+            }
+
             // ★ act5：第二 boss 槽位的清空已由 ActBlueprint 在黑屏内做好（见 Core/ActBlueprint.cs）。
             //   这里只保留诊断。
             if (act is Act5Model)
@@ -155,15 +205,31 @@ public static class BossGauntletStylePatches
 
         if (!PatchScope.IsEnabled) return;
         if (map == null) return;
-        if (ModCompat.SomeoneElsePatchesMapScreen("合成节点注入")) return;
+
+        // ★★ 这里**不能**"有人也 patch 了 SetMap ⇒ 整套放权"（2026-09-22 实际事故）。
+        //
+        //   `SetMap` 上我们做的事是**纯加法**：原方法（含所有其它 mod 的 postfix / IL hook）跑完之后，
+        //   往 `_points` 容器里多挂几个合成节点、写进 `_mapPointDictionary`、再补连线。
+        //   别的 mod 挂 postfix 或改 IL 都不会让这件事失效 —— Harmony 本来就允许多个 patch 共存。
+        //
+        //   反例（真实发生过）：创意工坊模组 Ascension100（3801607408）为"进阶 11 地图火焰特效"
+        //   挂了 `[HarmonyPatch(typeof(NMapScreen), "SetMap")]`（只 CallDeferred 一个纯视觉 Refresh）。
+        //   旧代码用 `SomeoneElsePatchesMapScreen` 一票否决 ⇒ **合成火堆的注入整个被跳过**，
+        //   而双 boss 本身还在（由 RunManager.GenerateMap 前缀那条无放权判定的路径补上），
+        //   于是现象就是用户报的「双BOSS中间火堆没有了」。
+        //
+        //   注：Ascension100 的后缀里 `MapFlames.Refresh` 是**延迟一帧**跑的，会遍历整棵树对
+        //   每个 NNormalMapPoint 挂火焰 —— 我们后注入的火堆节点也因此照样有火焰特效（实测更协调）。
+        ModCompat.NoteCoexistence("合成节点注入", NMapScreenSetMapMethod);
 
         PatchScope.Run(nameof(NMapScreenSetMapPostfix), () =>
         {
+            var st = RunStateAccessor.GetCurrentState();
+
             // act5：补上两个伪装 BOSS 节点（灵魂异鱼 / 知识恶魔）。
             // 它们用的是**我们自己的节点类**（图标跟着各自的 encounter 走），
             // 房间内容由 Act5EncounterPoolPatch 供给 —— 点节点后的流程全是原版的。
-            var state5 = RunStateAccessor.GetCurrentState();
-            if (state5?.Act is Act5Model)
+            if (st?.Act is Act5Model)
             {
                 var okMid = Act5MidBoss.InjectVisuals(__instance, map);
                 MainFile.DebugLog($"[Gauntlet] act5 伪装 BOSS 注入结果 = {okMid}");
@@ -175,18 +241,33 @@ public static class BossGauntletStylePatches
                 // 原版最终 BOSS 节点的贴图是在它自己的 _Ready 里挂的 ⇒ 延迟一帧再改色
                 var bossPointNode = Traverse.Create(__instance).Field("_bossPointNode").GetValue<NMapPoint>();
                 Callable.From(() => Act5VisualEffects.RecolorBossIcon(bossPointNode, myth)).CallDeferred();
+
+                // ★ 2026-09-22「叫醒」：这两行以前**丢了** —— AttachMapShimmer / UpdatePatternForFloor
+                //   在整棵源码树里零调用点（孤儿方法），所以"纹路金光流动 + 每次爬楼换卷云样式"
+                //   从来没生效过（只有 BOSS 图标改色是活的）。挂材质是这两件事的唯一前提：
+                //   不挂 rect.Material，后面所有 SetShaderParameter 都是往空气里改。
+                Act5VisualEffects.AttachMapShimmer(__instance, myth);
+                Act5VisualEffects.UpdatePatternForFloor(st.ActFloor);
                 return;
             }
 
             var ok = SyntheticHearth.InjectVisuals(__instance, map);
             MainFile.DebugLog($"[Gauntlet] 注入结果 = {ok}");
 
-            // ★ act4 也必须挂着色器材质！否则后面改 tint / pattern_seed 的 uniform
-            //   全是往空气里改 —— 实测（用户三连反馈）：act4 不换卷云样式、纹路不按层变色，
-            //   根因就是这里从来没挂过材质（attach 只在 act5 分支里调了）。
-
+            // ★ 2026-09-22「叫醒」：act4 地图节点图标"黄色 → 淡紫"（用户口径：问号/商店/火堆/精英/BOSS 的
+            //   底图黄色都换成淡紫）。Act4MapIconRecolor.Schedule 同样是孤儿方法（零调用点），一并接回；
+            //   它内部自己 CallDeferred（节点贴图是在各自 _Ready 里挂的，必须等一帧）。
+            //
+            //   注：act4 的**纹路**变色走另一条路（Act4MapStripeTint 状态 + ActVisualTheme.ForAct4 重绘底图，
+            //   因为实测三个 rect 的 Material 默认是 null、改 uniform 无效），两条互不干扰。
+            if (st?.Act is Act4Model) Act4MapIconRecolor.Schedule(__instance);
         });
     }
+
+    /// <summary>
+    ///     <c>NMapScreen.SetMap</c> 的 MethodInfo（<see cref="ModCompat.NoteCoexistence" /> 用来查谁也在 patch）。
+    /// </summary>
+    private static readonly MethodBase? NMapScreenSetMapMethod = ModCompat.MapScreenTarget;
 
     // ============================================================
     // 4) 可通行性重算之后：把合成节点补成可点
@@ -208,6 +289,9 @@ public static class BossGauntletStylePatches
             }
 
             SyntheticHearth.RefreshSyntheticTravelability(__instance);
+
+            // ★ 兜底：没进火堆也要能进第二个 BOSS（见 SyntheticHearth.EnsureSecondBossReachable）
+            SyntheticHearth.EnsureSecondBossReachable(__instance);
         });
     }
 
@@ -230,7 +314,34 @@ public static class BossGauntletStylePatches
             // 每次回到地图 = 又爬了一层 ⇒ 换一套卷云样式；同时把层色恢复成紫
             var st = RunStateAccessor.GetCurrentState();
             if (st?.Act is Act4Model or Act5Model) Act4EliteBackgroundByLayerPatch.ApplyTintForCurrentRoom(st);
+
+            // ★ act5 的卷云样式按楼层换（金光/血光流动是连续动画，不需要每次重挂）
+            if (st?.Act is Act5Model) Act5VisualEffects.UpdatePatternForFloor(st.ActFloor);
+
+            // ★ 兜底：进火堆/商店再出来时原版算不出第二个 BOSS 可通行 ⇒ 这里每次开地图都补一次
+            SyntheticHearth.EnsureSecondBossReachable(__instance);
         });
+    }
+
+    // ============================================================
+    // 4c) 点击那一刻的硬拦截：没进火堆也能进第二个 BOSS（2026-09-22 用户要求）
+    //
+    //     `NMapPoint.OnRelease` 的 IL 第一行就是 `if (!IsTravelable) return;`
+    //     （原版：`IL_0001: call get_IsTravelable` → `IL_0006: brtrue` → 否则 `ret`），
+    //     所以在它执行之前把"第二个 BOSS 节点"提成 Travelable，这一击就不会被吞。
+    //
+    //     ⚠️ 方法名用字符串字面量：`OnRelease` 是 protected override sealed，`nameof` 取不到
+    //     （踩坑指南 §3.5 同源教训）。
+    // ============================================================
+
+    [HarmonyPatch(typeof(NMapPoint), "OnRelease")]
+    [HarmonyPrefix]
+    [HarmonyPriority(Priority.First)]
+    public static void NMapPointOnReleasePrefix(NMapPoint __instance)
+    {
+        if (!PatchScope.IsEnabled) return;
+        PatchScope.Run(nameof(NMapPointOnReleasePrefix),
+            () => SyntheticHearth.TryAllowSecondBossClick(__instance));
     }
 
     // ============================================================
@@ -256,45 +367,45 @@ public static class BossGauntletStylePatches
     }
 
     // ============================================================
-    // 6) 进入地图节点：接管 **NMapScreen.TravelToMapCoord**
+    // 6) 点地图节点：**不接管** NMapScreen.TravelToMapCoord
     //
-    // ⚠️ 这里必须挂 TravelToMapCoord，不能挂 RunManager.EnterMapCoord（踩过大坑）：
-    // 崩溃堆栈证明玩家点地图的真实路径是
-    //     NMapScreen.TravelToMapCoord(coord)
-    //       → RunManager.EnterMapCoord(coord)
-    //       → RunManager.EnterMapPointInternal(actFloor, pointType, null, saveGame)
-    //       → CreateRoom(RoomType, MapPointType, model: null)
-    // 挂在 EnterMapCoord 上的钩子对"点地图"不生效 ——
-    // 所以注入的合成节点点不动、合成房间也进不去。
+    // ★ 这里从"接管"改回"放行"，是为了修一个我亲手造成的回归：
+    //   原版进房转场（画圈 + 渐黑）整个都在 TravelToMapCoord 里 ——
+    //     IsTraveling=true → RecalculateTravelability → MapSplitVoteAnimation（画圈）
+    //     → node.OnSelected() + NMapNodeSelectVfx + SfxCmd.Play("wipe_map")
+    //     → RunManager.FadeOut()（渐黑）→ 沿 _paths 逐点点亮 → await EnterMapCoord(coord)
+    //     → FadeIn + RefreshAllPointVisuals
+    //   我之前在这里直接 return false + 自己去调 EnterMapPointInternal，等于把上面**全部**跳过，
+    //   于是玩家看到的就是"点了火堆直接黑一下进房，没有画圈也没有渐黑"（用户实测反馈）。
     //
-    // act5 的伪装 BOSS 节点**不走这里**：它们是原生 PointType.Monster 节点，
-    // 房间里放谁由 Act5EncounterPoolPatch（ActModel.PullNextEncounter）决定。
+    //   转场需要的两样东西我们都齐：
+    //     ① `_mapPointDictionary[coord]` 里有合成节点（InjectVisuals 已登记，且强制成了 Travelable）
+    //     ② `_paths[(上一个已访问坐标, 合成坐标)]` 里有连线（InjectVisuals 里 DrawPaths 已画）
+    //   所以放行即可恢复原版演出。
+    //
+    // ⚠️ 真正必须接管的点在下一节 RunManager.EnterMapCoord —— 原版实现是
+    //      `MapPoint point = State.Map.GetPoint(coord); EnterMapPointInternal(coord.row + 1, point.PointType, ...)`，
+    //    合成坐标在**网格外**，GetPoint 解析不到（null）会直接炸。
     // ============================================================
 
     [HarmonyPatch(typeof(NMapScreen), nameof(NMapScreen.TravelToMapCoord))]
     [HarmonyPrefix]
     [HarmonyPriority(Priority.High)]
-    public static bool NMapScreenTravelToMapCoordPrefix(NMapScreen __instance, MapCoord coord, ref Task __result)
+    public static bool NMapScreenTravelToMapCoordPrefix(MapCoord coord)
     {
         if (!PatchScope.IsEnabled) return true;
 
-        Task? takeover = null;
-        var handled = PatchScope.Run(nameof(NMapScreenTravelToMapCoordPrefix), () =>
+        PatchScope.Run(nameof(NMapScreenTravelToMapCoordPrefix), () =>
         {
             var state = RunStateAccessor.GetCurrentState();
-            if (state?.Map == null) return false;
+            if (!SyntheticHearth.IsSyntheticCoord(state, coord)) return;
 
-            var rm = RunManager.Instance;
-            if (rm == null) return false;
+            MainFile.DebugLog(
+                $"[Gauntlet] 合成坐标 ({coord.col},{coord.row}) 走**原版旅行流程**" +
+                "（保留画圈 + 渐黑转场；进房由 EnterMapCoord 接管）");
+        });
 
-            // 合成火堆/商店（act1~4）
-            return SyntheticHearth.TryEnterSyntheticRoom(rm, state, coord, out takeover);
-        }, false);
-
-        if (!handled || takeover == null) return true;
-
-        __result = takeover;
-        return false;
+        return true;   // 一律放行：转场演出全在原版实现里，接管它就等于删掉转场
     }
 
     // ============================================================
@@ -307,6 +418,10 @@ public static class BossGauntletStylePatches
     public static bool RunManagerEnterMapCoordPrefix(RunManager __instance, MapCoord coord, ref Task __result)
     {
         if (!PatchScope.IsEnabled) return true;
+
+        // 登记"正要进哪个坐标"：SecondBossEncounterPullPatch 靠它判断这一场是不是第二个 BOSS 节点
+        // （原版 PullNextEncounter(Boss) 只会给 RoomSet 里那个固定 boss ⇒ 第二场会重复第一场）。
+        SecondBossEntry.RecordEnteringCoord(coord);
 
         Task? takeover = null;
         var handled = PatchScope.Run(nameof(RunManagerEnterMapCoordPrefix), () =>

@@ -23,8 +23,11 @@ namespace NotEnoughDifficulty.NotEnoughDifficultyCode;
 ///
 /// ## 本 patch 做什么
 /// 既然双 boss 是对玩家的考验，就让它回到它该在的地方（第 3 层）：
-/// 1. 若 N10 生效：把第二个 boss <b>放回 act 索引 2（第 3 层）</b>，并清掉其它层上被游戏误加的第二个 boss
-/// 2. 若 N10 未生效：清掉任何第二个 boss（本 mod 不允许非 N10 时凭空出现双 boss）
+/// 1. 若 N10 生效：把第二个 boss <b>放回 act 索引 2（第 3 层）</b>；
+/// 2. 清掉"基础游戏误加在<b>最后一幕</b>上的第二个 boss"（N10 生效与否都做，见下）；
+/// 3. 其它层（act1/2/4）的第二个 boss <b>一律不动</b>——那是本 mod 按层开关
+///    （<see cref="DoubleBossConfigPatch" />）或别的 mod（Ascension100 进阶 18 等）的安排，
+///    无差别清空等于删别人的功能（2026-09-22「叫醒」时改掉了旧的全清逻辑）。
 ///
 /// 结果：<b>不管 act 列表被追加了多长，N10 双 boss 永远落在第 3 层</b>。
 ///
@@ -68,43 +71,46 @@ public static class N10DoubleBossAtAct3Patch
 
         PatchScope.Run(nameof(N10DoubleBossAtAct3Patch), () =>
         {
-            // 兼容性放权：有别的 mod 在管房间生成时，act3 的双 boss 归它安排。
-            if (ModCompat.SomeoneElsePatchesRoomGeneration("N10 双 boss 钉位"))
-                return;
+            // ★ 这里**不再"有人在改 GenerateRooms ⇒ 整套放权"**（2026-09-22「叫醒」）。
+            //   放权的后果：Ascension100（工坊 3801607408）的 `Ascension18.DoubleBossPlus` 一装上，
+            //   N10 的第 3 层钉位与 act5 槽位清理就全部失效（双 boss 被基础游戏丢在最后一幕）。
+            //   见 DoubleBossConfigPatch 里同一处改动的说明。
+            ModCompat.NoteCoexistence("N10 双 boss 钉位", ModCompat.RoomGenerationTarget);
 
             var state = RunStateAccessor.GetState(__instance);
             if (state?.Acts == null || state.Acts.Count == 0) return;
 
             var hasDoubleBossAscension = AscensionHelper.HasAscension(AscensionLevel.DoubleBoss);
 
+            // 目标层：act 索引 2 = 第 3 层。列表比 3 短时（不该发生）退化为最后一个 act。
+            // N10 未生效时不设"保留对象"（keep = null），清理逻辑另有"只碰本模组自己的追加幕"这道闸。
+            var targetIndex = state.Acts.Count > Act3Index ? Act3Index : state.Acts.Count - 1;
+            var keep = hasDoubleBossAscension ? state.Acts[targetIndex] : null;
+
+            // ── 只清"基础游戏误加在**最后一幕**上的第二个 boss" ──
+            //
+            // ⚠️ 历史：基础游戏 GenerateRooms 的 N10 分支写死"最后一个 act"
+            // （`actIndex == Acts.Count - 1`），而本 mod 的 act4/5 是**追加**到末尾的 ⇒ 那个位置
+            // 变成了 act5，于是游戏给 act5 塞了一个第二 boss（实测是玩家刚在 act4 打过的重复 boss）。
+            // 那一幕按设计永远是我们自己的 Act4/Act5 模型，且 act5 的第二场由本 mod 在建图前
+            // 按名单定稿（见 Act5BossDisplay），所以**必须清掉**。
+            //
+            // ★ 但**不再无差别清空其它层**（旧代码是 `foreach (act) if (act != target) Clear()`）：
+            //   其它层的第二 boss 要么是本 mod 按层开关放的（DoubleBossConfigPatch），
+            //   要么是别的 mod 放的（Ascension100 进阶 18 的第二幕、BossGauntlet 等）。
+            //   那些是别人的合法行为，无差别清掉 = 把别人的功能也一起删了（多 mod 环境下不可接受）。
+            ClearMisplacedLastActSecondBoss(state, keep);
+
             if (!hasDoubleBossAscension)
             {
-                ClearAllSecondBosses(state, "N10 未生效");
+                MainFile.DebugLog(
+                    "[N10DoubleBoss] N10 未生效：只清最后一幕的第二个 boss；其它层的第二 boss" +
+                    "（别人的安排 / 本 mod 按层开关）一律不动");
                 return;
             }
 
-            // 目标层：act 索引 2 = 第 3 层。列表比 3 短时（不该发生）退化为最后一个 act。
-            var targetIndex = state.Acts.Count > Act3Index ? Act3Index : state.Acts.Count - 1;
-            var target = state.Acts[targetIndex];
-
-            // 先把其它层上被游戏误加的第二个 boss 清掉（**含被追加的 act5 上那个**）。
-            //
-            // ⚠️ 这里曾经把 act5 排除在外（`act is not Act5Model`），理由是"act5 需要
-            // SecondBossMapPoint 当合成火堆锚点"。那个理由是错的，后果是：
-            //   基础游戏 GenerateRooms 的 N10 分支给"最后一个 act"（= 被追加后的 act5）
-            //   塞了一个 boss（实测是玩家刚在 act4 打过的 TEST_SUBJECT_BOSS），
-            //   而 act5 永远不清 → EnsureAct5SecondBossAnchor 看到 HasSecondBoss 就跳过
-            //   → act5 第二场变成**重复 boss**。
-            // 现在 act5 一并清掉：act5 出生时没有第二个 boss，由本 mod 在**建图前**
-            // （BossGauntletStylePatches.RunManagerGenerateMapPrefix）按名单定稿
-            // （见 Act5BossDisplay）。act5 自己会提供 SecondBossMapPoint，火堆锚点不受影响。
-            foreach (var act in state.Acts)
-                if (!ReferenceEquals(act, target))
-                    TryClearSecondBoss(act);
-
-            MainFile.DebugLog(
-                "[N10DoubleBoss] 已清掉其它层的第二个 boss（含基础游戏误加在 act5 上的；" +
-                "act5 的第二场由本 mod 在建图前按名单定稿）");
+            // N10 生效 ⇒ keep 必然非 null（上面就是按 hasDoubleBossAscension 取的）
+            var target = keep!;
 
             if (target.HasSecondBoss)
             {
@@ -128,6 +134,33 @@ public static class N10DoubleBossAtAct3Patch
                 $"[N10DoubleBoss] N10 双 boss 已按回第 3 层：首个='{target.BossEncounter?.Id?.Entry}' " +
                 $"第二='{second!.Id.Entry}'（候选池 {pool.Count}）");
         });
+    }
+
+    /// <summary>
+    ///     清掉"基础游戏误加在最后一幕"的第二个 boss。
+    ///     只对**本模组自己的追加幕**（<see cref="Act4Model" /> / <see cref="Act5Model" />）动手，
+    ///     且当它就是 N10 的钉位目标（act 列表只有 3 幕时 = 第 3 层）时**不动**。
+    /// </summary>
+    private static void ClearMisplacedLastActSecondBoss(RunState state, ActModel? keep)
+    {
+        try
+        {
+            var acts = state.Acts;
+            var last = acts[acts.Count - 1];
+
+            if (ReferenceEquals(last, keep)) return;                  // 它就是钉位目标 ⇒ 保留
+            if (last is not (Act4Model or Act5Model)) return;         // 不是我们的幕 ⇒ 不碰别人的安排
+
+            if (TryClearSecondBoss(last))
+            {
+                MainFile.DebugLog(
+                    $"[N10DoubleBoss] 已清掉基础游戏误加在最后一幕（{last.Id?.Entry}）上的第二个 boss");
+            }
+        }
+        catch (Exception ex)
+        {
+            MainFile.Logger.Warn($"[N10DoubleBoss] 清最后一幕第二 boss 失败: {ex.Message}");
+        }
     }
 
     /// <summary>
@@ -155,16 +188,6 @@ public static class N10DoubleBossAtAct3Patch
         return (act.AllBossEncounters ?? Enumerable.Empty<EncounterModel>())
             .Where(b => b?.Id?.Entry is { } id && !exclude.Contains(id))
             .ToList();
-    }
-
-    private static void ClearAllSecondBosses(RunState state, string reason)
-    {
-        var cleared = 0;
-        foreach (var act in state.Acts)
-            if (TryClearSecondBoss(act)) cleared++;
-
-        if (cleared > 0)
-            MainFile.DebugLog($"[N10DoubleBoss] {reason}：清掉 {cleared} 个被误加的第二个 boss（act5 的保留不动）");
     }
 
     private static bool TryClearSecondBoss(ActModel? act)
